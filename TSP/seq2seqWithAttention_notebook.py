@@ -110,10 +110,10 @@ class Decoder(nn.Module):
             log_probs = F.log_softmax(decoder_output, dim=2)
             logp = torch.gather(log_probs, 2, chosen_indexes.unsqueeze(2).long()).squeeze(2)  # [batch_size, 1]
 
-            tour_logp.append(logp.unsqueeze(1))
+            tour_logp.append(logp)
             tours.append(chosen_indexes.unsqueeze(1))
 
-        attentions = torch.cat(attentions, dim=1)
+        attentions = torch.cat(attentions, dim=1) #ΤΟΔΟ¨πλοτ αττεντιον ςειγητσ
         tours = torch.cat(tours, 2)
         tour_logp = torch.cat(tour_logp, dim=1)  # (batch_size, seq_len)
 
@@ -181,7 +181,7 @@ def validate_model(model, dataloader):
 
             distances = reward_fn(input_tensor.transpose(1, 2), output_routes.squeeze(1).to(torch.int64))
 
-            advantage = -distances.mean()
+            advantage = -distances.sum()
 
             loss = torch.mean(advantage * (tour_logp.sum(1)))
 
@@ -210,7 +210,7 @@ def train_epoch(model, dataloader, optimizer):
 
         distances = reward_fn(input_tensor.transpose(1, 2), output_routes.squeeze(1).to(torch.int64))
 
-        advantage = -distances.mean()
+        advantage = -distances.sum()
 
         loss = torch.mean(advantage * (tour_logp.sum(1)))
 
@@ -328,8 +328,8 @@ import numpy as np
 if __name__ == '__main__':
     epochs = 100
     num_nodes = 5
-    train_size = 500000  # 0
-    test_size = 5000
+    train_size = 1000  # 0
+    test_size = 1000
     batch_size = 256
     validation_batch_size = 256
     lr = 1e-4
