@@ -11,14 +11,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Implementation: https://github.com/ajayn1997/RL-VRP-PtrNtwrk/tree/main
+from train_utilities.EarlyStopping import EarlyStopping
 
-
-train_size = 10000#000  # 0#000  # 1000000
-batch_size = 256
-validation_size = 300  # 0#0
+train_size = 100  # 00#000  # 0#000  # 1000000
+batch_size = 8  # 256
+validation_size = 100  # 0#0
 hidden_size = 128
 lr = 5e-4  # 0.0005
-epochs = 30
+epochs = 3  # 0
 seq_len = 20
 
 
@@ -31,8 +31,6 @@ seq_len = 20
 # seq_len = 20
 
 
-
-
 class Pointer(nn.Module):
     """Calculates the next state given the previous state and input embeddings."""
 
@@ -43,18 +41,18 @@ class Pointer(nn.Module):
         self.num_layers = num_layers
 
         # Used to calculate probability of selecting next state
-        self.v = nn.Parameter(torch.zeros((1, 1, hidden_size),  requires_grad=True))
+        self.v = nn.Parameter(torch.zeros((1, 1, hidden_size), requires_grad=True))
 
-        self.W = nn.Parameter(torch.zeros((1, hidden_size, 3 * hidden_size),  requires_grad=True))
+        self.W = nn.Parameter(torch.zeros((1, hidden_size, 3 * hidden_size), requires_grad=True))
 
         # Used to compute a representation of the current decoder output
-        self.gru = nn.GRU(hidden_size, hidden_size, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        self.gru = nn.GRU(hidden_size, hidden_size, num_layers, batch_first=True,
+                          dropout=dropout if num_layers > 1 else 0)
 
         self.drop_rnn = nn.Dropout(p=dropout)
         self.drop_hh = nn.Dropout(p=dropout)
 
     def forward(self, static_hidden, dynamic_hidden, decoder_hidden, last_hh):
-
         batch_size, hidden_size, seq_len = static_hidden.size()
         rnn_out, last_hh = self.gru(decoder_hidden.transpose(2, 1), last_hh)
 
@@ -68,15 +66,17 @@ class Pointer(nn.Module):
         W = self.W.expand(static_hidden.size(0), -1, -1)
 
         context = rnn_out.transpose(1, 2).expand_as(static_hidden)
-        energy = torch.cat((static_hidden,dynamic_hidden, context), dim=1)
+        energy = torch.cat((static_hidden, dynamic_hidden, context), dim=1)
         probs = torch.bmm(v, torch.tanh(torch.bmm(W, energy))).squeeze(1)  # [batch_size, seq_len]
 
         assert probs.size(0) == batch_size
         assert probs.size(1) == seq_len
         return probs, last_hh
 
+
 class Encoder(nn.Module):
     """Encodes the static & dynamic states using 1d Convolution."""
+
     def __init__(self, input_size, hidden_size):
         super(Encoder, self).__init__()
         self.conv = nn.Conv1d(input_size, hidden_size, kernel_size=1)
@@ -84,6 +84,7 @@ class Encoder(nn.Module):
     def forward(self, input):
         output = self.conv(input)
         return output  # (batch, hidden_size, seq_len)
+
 
 class Seq2SeqModelCVRP(nn.Module):
     """Defines the main Encoder, Decoder, and Pointer combinatorial models.
@@ -138,7 +139,7 @@ class Seq2SeqModelCVRP(nn.Module):
                 nn.init.xavier_uniform_(p)
 
         # Used as a proxy initial state in the decoder when not specified
-        self.x0 = torch.zeros((1, static_size, 1), requires_grad=True )
+        self.x0 = torch.zeros((1, static_size, 1), requires_grad=True)
 
     def forward(self, static, dynamic, decoder_input=None, last_hh=None):
         """
@@ -196,7 +197,7 @@ class Seq2SeqModelCVRP(nn.Module):
                 ptr = m.sample()
                 while not torch.gather(mask, 1, ptr.data.unsqueeze(1)).byte().all():
                     ptr = m.sample()
-                logp = m.log_prob(ptr)# log probability pithanothta epiloghs action ptr given input m
+                logp = m.log_prob(ptr)  # log probability pithanothta epiloghs action ptr given input m
             else:
                 prob, ptr = torch.max(probs, 1)  # Greedy
                 logp = prob.log()
@@ -210,7 +211,7 @@ class Seq2SeqModelCVRP(nn.Module):
                 # number of stops. We force the vehicles to remain at the depot
                 # in these cases, and logp := 0
                 is_done = dynamic[:, 1].sum(1).eq(0).float()
-                logp = logp * (1. - is_done) # logp: pithanothta epiloghs action y_1 given input x_1
+                logp = logp * (1. - is_done)  # logp: pithanothta epiloghs action y_1 given input x_1
 
             # And update the mask so we don't re-visit if we don't need to
             if self.mask_fn is not None:
@@ -226,10 +227,13 @@ class Seq2SeqModelCVRP(nn.Module):
 
         return tour_idx, tour_logp
 
+
 torch.backends.cudnn.benchmark = True
-torch.backends.cudnn.enabled=False
+torch.backends.cudnn.enabled = False
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Detected device {}'.format(device))
+from torch.nn.functional import normalize
+
 
 def validate(data_loader, actor, reward_fn, render_fn=None, save_dir='.', num_plot=5):
     """Used to monitor progress on a validation set & optionally plot solution."""
@@ -252,20 +256,22 @@ def validate(data_loader, actor, reward_fn, render_fn=None, save_dir='.', num_pl
 
             distanceTravelled = reward_fn(static, tour_indices).mean().item()
             advantage = - distanceTravelled
-            loss = torch.mean(advantage * tour_logp.sum(dim=1))# minimize to -advantage aka max(advantage)
+
+            loss = torch.mean(advantage * tour_logp.sum(dim=1))  # minimize to -advantage aka max(advantage)
 
             rewards.append(np.mean(advantage))
             losses.append(torch.mean(loss.detach()).item())
 
         if render_fn is not None and batch_idx < num_plot:
-            name = 'batch%d_%2.4f.png'%(batch_idx, advantage)
+            name = 'batch%d_%2.4f.png' % (batch_idx, advantage)
             path = os.path.join(save_dir, name)
             render_fn(static, tour_indices, path)
 
     actor.train()
     return np.mean(rewards), np.mean(losses)
 
-def train(actor,  task, num_nodes, train_data, valid_data, reward_fn,
+
+def train(actor, task, num_nodes, train_data, valid_data, reward_fn,
           render_fn, batch_size,
           epochs,
           experiment_details,
@@ -319,8 +325,7 @@ def train(actor,  task, num_nodes, train_data, valid_data, reward_fn,
             # Sum the log probabilities for each city in the tour
             distanceTravelled = reward_fn(static, tour_indices)
             advantage = -distanceTravelled
-
-            loss = torch.mean(advantage.detach() * tour_logp.sum(dim=1))
+            loss = torch.mean(advantage * tour_logp.sum(dim=1))
 
             actor_optim.zero_grad()
             loss.backward()
@@ -338,7 +343,8 @@ def train(actor,  task, num_nodes, train_data, valid_data, reward_fn,
                 mean_loss = np.mean(losses[-100:])
                 mean_reward = np.mean(rewards[-100:])
 
-                print('Batch %d/%d, reward: %2.3f, loss: %2.4f, took: %2.4fs' % (batch_idx, len(train_loader), mean_reward, mean_loss,  times[-1]))
+                print('Batch %d/%d, reward: %2.3f, loss: %2.4f, took: %2.4fs' % (
+                    batch_idx, len(train_loader), mean_reward, mean_loss, times[-1]))
 
         # Epoch finished
         training_time_per_epoch.append(np.sum(times))
@@ -357,12 +363,11 @@ def train(actor,  task, num_nodes, train_data, valid_data, reward_fn,
         # Save rendering of validation set tours
         valid_dir = os.path.join(save_dir, '%s' % epoch)
 
-        mean_valid_reward, mean_valid_loss =validate(valid_loader, actor, reward_fn, render_fn, valid_dir, num_plot=5)
+        mean_valid_reward, mean_valid_loss = validate(valid_loader, actor, reward_fn, render_fn, valid_dir, num_plot=5)
         early_stopping(mean_valid_reward, actor, path="checkpoints\\modelCVRPAttention")
         if early_stopping.early_stop:
             print(f"-------------------Early stopping at epoch {epoch}-------------------")
             break
-
 
         # Save best model parameters
         if mean_valid_reward < best_reward:
@@ -372,7 +377,7 @@ def train(actor,  task, num_nodes, train_data, valid_data, reward_fn,
 
         average_advantage_validation_data.append(mean_valid_reward)
         average_loss_validation_data.append(mean_valid_loss)
-        print('Mean epoch loss/reward: %2.4f, %2.4f, %2.4f, took: %2.4fs '\
+        print('Mean epoch loss/reward: %2.4f, %2.4f, %2.4f, took: %2.4fs ' \
               '(%2.4fs / 100 batches)\n' % \
               (mean_loss, mean_reward, mean_valid_reward, time.time() - epoch_start, np.mean(times)))
 
@@ -408,10 +413,6 @@ def train(actor,  task, num_nodes, train_data, valid_data, reward_fn,
                                      average_advantage_validation_data,
                                      experiment_details,
                                      folder_name=modelName)
-
-
-
-
 
 
 def reward(static, tour_indices):
@@ -489,7 +490,6 @@ def render(static, tour_indices, save_path):
 
 
 def train_vrp(args):
-
     # Goals from paper:
     # VRP10, Capacity 20:  4.84  (Greedy)
     # VRP20, Capacity 30:  6.59  (Greedy)
@@ -501,8 +501,8 @@ def train_vrp(args):
     # Determines the maximum amount of load for a vehicle based on num nodes
     LOAD_DICT = {10: 20, 20: 30, 50: 40, 100: 50}
     MAX_DEMAND = 9
-    STATIC_SIZE = 2 # (x, y)
-    DYNAMIC_SIZE = 2 # (load, demand)
+    STATIC_SIZE = 2  # (x, y)
+    DYNAMIC_SIZE = 2  # (load, demand)
 
     max_load = LOAD_DICT[args.num_nodes]
 
@@ -520,12 +520,12 @@ def train_vrp(args):
                                        args.seed + 1)
 
     actor = Seq2SeqModelCVRP(STATIC_SIZE,
-                    DYNAMIC_SIZE,
-                    args.hidden_size,
-                    train_data.update_dynamic,
-                    train_data.update_mask,
-                    args.num_layers,
-                    args.dropout).to(device)
+                             DYNAMIC_SIZE,
+                             args.hidden_size,
+                             train_data.update_dynamic,
+                             train_data.update_mask,
+                             args.num_layers,
+                             args.dropout).to(device)
     print('Actor: {} '.format(actor))
 
     kwargs = vars(args)
@@ -538,9 +538,8 @@ def train_vrp(args):
         path = os.path.join(args.checkpoint, 'actor.pt')
         actor.load_state_dict(torch.load(path, device))
 
-
     if not args.test:
-        train(actor,  **kwargs)
+        train(actor, **kwargs)
 
     test_data = VehicleRoutingDataset(args.valid_size,
                                       args.num_nodes,
@@ -554,13 +553,12 @@ def train_vrp(args):
 
     print('Average tour length: ', out)
 
+
 if __name__ == '__main__':
-
-
-    experiment_details =  f'bmmseq2seqCVRP_epoch{epochs}_trainSize{train_size}_bs{batch_size}_valSize{validation_size}_hidden{hidden_size}_lr{lr}'
+    experiment_details = f'bmmseq2seqCVRP_epoch{epochs}_trainSize{train_size}_bs{batch_size}_valSize{validation_size}_hidden{hidden_size}_lr{lr}'
     parser = argparse.ArgumentParser(description='Combinatorial Optimization')
 
-    parser.add_argument('--experiment_details', default=experiment_details )
+    parser.add_argument('--experiment_details', default=experiment_details)
     parser.add_argument('--epochs', default=epochs, type=int)
     parser.add_argument('--seed', default=12345, type=int)
     parser.add_argument('--checkpoint', default=None)
@@ -574,13 +572,13 @@ if __name__ == '__main__':
     parser.add_argument('--hidden', dest='hidden_size', default=hidden_size, type=int)
     parser.add_argument('--dropout', default=0.1, type=float)
     parser.add_argument('--layers', dest='num_layers', default=1, type=int)
-    parser.add_argument('--train-size',default=train_size, type=int)
+    parser.add_argument('--train-size', default=train_size, type=int)
     parser.add_argument('--valid-size', default=validation_size, type=int)
 
     args = parser.parse_args()
 
-    #print('NOTE: SETTTING CHECKPOINT: ')
-    #args.checkpoint = os.path.join('vrp', '10', '12_59_47.350165' + os.path.sep)
-    #print(args.checkpoint)
+    # print('NOTE: SETTTING CHECKPOINT: ')
+    # args.checkpoint = os.path.join('vrp', '10', '12_59_47.350165' + os.path.sep)
+    # print(args.checkpoint)
 
     train_vrp(args)
